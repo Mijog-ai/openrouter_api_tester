@@ -107,11 +107,14 @@ class ChatWidget(QWidget):
 
         header.addWidget(QLabel("Max tokens"))
         self._max_tokens_spin = QSpinBox()
-        self._max_tokens_spin.setRange(0, 200_000)
-        self._max_tokens_spin.setSingleStep(128)
-        self._max_tokens_spin.setValue(1024)
-        self._max_tokens_spin.setSpecialValueText("auto")
-        self._max_tokens_spin.setFixedWidth(90)
+        self._max_tokens_spin.setRange(0, 2_000_000)
+        self._max_tokens_spin.setSingleStep(256)
+        self._max_tokens_spin.setValue(0)  # 0 = unlimited (parameter omitted)
+        self._max_tokens_spin.setSpecialValueText("unlimited")
+        self._max_tokens_spin.setToolTip(
+            "0 = unlimited (no max_tokens sent; the model uses its own maximum)."
+        )
+        self._max_tokens_spin.setFixedWidth(100)
         header.addWidget(self._max_tokens_spin)
         layout.addLayout(header)
 

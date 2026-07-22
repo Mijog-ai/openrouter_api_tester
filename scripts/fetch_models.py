@@ -14,7 +14,7 @@ from pathlib import Path
 # Allow running as a plain script without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from openrouter_tester.catalog import build_catalog, save_cache  # noqa: E402
+from openrouter_tester.catalog import build_catalog, flatten, save_cache  # noqa: E402
 from openrouter_tester.client import OpenRouterClient  # noqa: E402
 
 
@@ -26,8 +26,12 @@ def main() -> int:
     save_cache(raw, generated_at)
 
     catalog = build_catalog(raw)
-    total = sum(len(v) for v in catalog.values())
-    print(f"Saved {len(raw)} raw models ({total} after excluding audio).")
+    distinct = len(flatten(catalog))
+    print(
+        f"Saved {len(raw)} raw models "
+        f"({distinct} distinct after excluding audio-output models)."
+    )
+    print("Per-category counts (overlapping — a model can appear in several):")
     for category, models in catalog.items():
         print(f"  {category:22} {len(models)}")
     print(f"generated_at = {generated_at}")

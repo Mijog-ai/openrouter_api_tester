@@ -17,13 +17,19 @@ vision/multimodal, image generation, document/file) is supported.
   indicator in the top bar shows the current source: **● Live** (green),
   **● Cached preload** / **● Preload (live failed)** (amber, with the error in
   its tooltip), or **● Load failed** (red). Hit **Refresh models** to re-fetch.
-- **Categorised catalog** — each model is sorted by its input/output
-  modalities:
-  - **Text** — text-in / text-out chat models
-  - **Vision / Multimodal** — accept image or video input
-  - **Image Generation** — produce images as output
+- **Overlapping capability categories** — like OpenRouter's own filters, a
+  model appears under **every** capability it supports (so per-category counts
+  add up to more than the number of distinct models):
+  - **Text** — accept text input
+  - **Image (vision)** — accept image input
+  - **Video** — accept video input
   - **Document / File** — accept file/PDF input
-- **Audio filtered out** — any model with audio input or output is dropped.
+  - **Image Generation** — produce images as output
+- **Only true audio models excluded** — models whose **output** is audio
+  (TTS / music, e.g. `openai/gpt-audio`, Lyria) are dropped, since we can't
+  render audio. Multimodal models that merely *accept* audio input but reply in
+  text/image (e.g. Gemini) are **kept** and fully usable via their other
+  modalities (audio input just isn't offered in the UI).
 - **Adaptive playground** — the chat panel reshapes itself to the selected
   model:
   - **Text** → plain streaming chat.
@@ -93,15 +99,22 @@ openrouter_tester/
 ## How categorisation works
 
 Each OpenRouter model reports its `architecture.input_modalities` and
-`architecture.output_modalities` (e.g. `["text", "image"]`). The app assigns a
-single category using this priority:
+`architecture.output_modalities` (e.g. `["text", "image"]`). Categories are
+**overlapping capability filters** — a model is added to a category for each
+capability it has:
 
-1. Outputs an image → **Image Generation**
-2. Accepts image/video input → **Vision / Multimodal**
-3. Accepts file input → **Document / File**
-4. Otherwise → **Text**
+| Category | Condition |
+|---|---|
+| **Text** | `text` in input modalities |
+| **Image (vision)** | `image` in input modalities |
+| **Video** | `video` in input modalities |
+| **Document / File** | `file` in input modalities |
+| **Image Generation** | `image` in output modalities |
 
-Any model whose input *or* output modalities include `audio` is excluded.
+So a model that takes text + image + video is listed under all three. The
+status bar reports the number of **distinct** models; per-category counts are
+larger because of the overlap. Only models whose **output** includes `audio`
+are excluded.
 
 ## Notes
 

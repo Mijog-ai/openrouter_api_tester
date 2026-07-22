@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..catalog import Model
+from ..catalog import Model, flatten
 from ..client import OpenRouterClient
 from ..workers import BatchTestWorker
 
@@ -112,10 +112,9 @@ class BatchTestWidget(QWidget):
     def _selected_models(self) -> list[Model]:
         category = self._category.currentText()
         if category == _ALL:
-            models = [m for models in self._catalog.values() for m in models]
-        else:
-            models = list(self._catalog.get(category, []))
-        return models
+            # Distinct models across all categories (no double-testing).
+            return flatten(self._catalog)
+        return list(self._catalog.get(category, []))
 
     def _update_count_hint(self, *_args) -> None:
         available = len(self._selected_models())
@@ -144,7 +143,7 @@ class BatchTestWidget(QWidget):
         self._table.setRowCount(len(models))
         for row, model in enumerate(models):
             self._set_cell(row, 0, model.name)
-            self._set_cell(row, 1, model.category)
+            self._set_cell(row, 1, model.primary_category)
             self._set_cell(row, 2, "queued")
             self._set_cell(row, 3, "")
             self._set_cell(row, 4, "")

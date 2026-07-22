@@ -34,6 +34,7 @@ from ..catalog import (
     CATEGORY_DESCRIPTIONS,
     Model,
     build_catalog,
+    flatten,
     load_cached_raw,
     save_cache,
 )
@@ -216,14 +217,14 @@ class MainWindow(QMainWindow):
         # Preserve the current selection across a refresh, if possible.
         selected_id = self._current_model_id()
         self._catalog = build_catalog(raw_models)
-        total = sum(len(v) for v in self._catalog.values())
+        total = len(flatten(self._catalog))  # distinct models
         self._populate_tree()
         self._batch.set_catalog(self._catalog)
         if selected_id:
             self._reselect(selected_id)
         self.statusBar().showMessage(
-            f"{total} models across {len(self._catalog)} categories "
-            f"(audio excluded) · source: {source}"
+            f"{total} distinct models across {len(self._catalog)} overlapping "
+            f"categories (audio-output models excluded) · source: {source}"
         )
 
     def _cleanup_fetch_worker(self) -> None:
