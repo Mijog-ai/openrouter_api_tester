@@ -11,10 +11,13 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
+from openrouter_tester.config import load_dotenv
 from openrouter_tester.ui.main_window import MainWindow
 
 
 def main() -> int:
+    # Load a local .env (e.g. OPENROUTER_API_KEY) before the UI reads the env.
+    load_dotenv()
     app = QApplication(sys.argv)
     app.setApplicationName("OpenRouter API Tester")
     window = MainWindow()
