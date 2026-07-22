@@ -7,8 +7,15 @@ from typing import Any
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+import base64
+
 from .catalog import Model
-from .client import OpenRouterClient, OpenRouterError
+from .client import (
+    OpenRouterClient,
+    OpenRouterError,
+    extract_image_urls,
+    message_text,
+)
 
 
 class ModelFetchWorker(QThread):
@@ -119,6 +126,70 @@ class CompletionWorker(QThread):
             self.failed.emit(f"Unexpected error: {exc}")
         else:
             self.finished_ok.emit(message)
+
+
+class ImageGenWorker(QThread):
+    """Generate images: run the completion, then resolve every image to bytes.
+
+    Emits ``finished_ok(images_bytes, text)`` where ``images_bytes`` is a list
+    of raw image byte-strings (data URLs decoded, remote URLs downloaded) and
+    ``text`` is any accompanying text the model returned.
+    """
+
+    finished_ok = pyqtSignal(list, str)
+    failed = pyqtSignal(str)
+
+    def __init__(
+        self,
+        client: OpenRouterClient,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+    ) -> None:
+        super().__init__()
+        self._client = client
+        self._model = model
+        self._messages = messages
+        self._max_tokens = max_tokens
+
+    def run(self) -> None:
+        try:
+            message = self._client.chat_completion(
+                self._model,
+                self._messages,
+                temperature=None,  # image models commonly reject sampling params
+                max_tokens=self._max_tokens,
+                modalities=["image", "text"],
+            )
+        except OpenRouterError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            self.failed.emit(f"Unexpected error: {exc}")
+            return
+
+        urls = extract_image_urls(message)
+        text = message_text(message)
+        images: list[bytes] = []
+        for url in urls:
+            data = self._resolve(url)
+            if data:
+                images.append(data)
+        self.finished_ok.emit(images, text)
+
+    def _resolve(self, url: str) -> bytes | None:
+        if url.startswith("data:") and "base64," in url:
+            try:
+                return base64.b64decode(url.split("base64,", 1)[1])
+            except (ValueError, TypeError):
+                return None
+        if url.startswith("http://") or url.startswith("https://"):
+            try:
+                return self._client.fetch_bytes(url)
+            except OpenRouterError:
+                return None
+        return None
 
 
 class BatchTestWorker(QThread):

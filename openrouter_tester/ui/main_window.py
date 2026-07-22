@@ -42,6 +42,8 @@ from ..client import OpenRouterClient
 from ..workers import ModelFetchWorker
 from .batch_test_widget import BatchTestWidget
 from .chat_widget import ChatWidget
+from .image_studio import ImageStudioWidget
+from .video_studio import VideoStudioWidget
 
 _MODEL_ROLE = Qt.ItemDataRole.UserRole
 
@@ -103,7 +105,13 @@ class MainWindow(QMainWindow):
 
         # --- tabs ------------------------------------------------------- #
         self._tabs = QTabWidget()
-        self._tabs.addTab(self._build_playground_tab(), "Playground")
+        self._tabs.addTab(self._build_playground_tab(), "Chat")
+
+        self._image_studio = ImageStudioWidget(self._client)
+        self._tabs.addTab(self._image_studio, "Image")
+
+        self._video_studio = VideoStudioWidget(self._client)
+        self._tabs.addTab(self._video_studio, "Video")
 
         self._batch = BatchTestWidget(self._client)
         self._tabs.addTab(self._batch, "Batch Test")
@@ -220,6 +228,8 @@ class MainWindow(QMainWindow):
         total = len(flatten(self._catalog))  # distinct models
         self._populate_tree()
         self._batch.set_catalog(self._catalog)
+        self._image_studio.set_catalog(self._catalog)
+        self._video_studio.set_catalog(self._catalog)
         if selected_id:
             self._reselect(selected_id)
         self.statusBar().showMessage(

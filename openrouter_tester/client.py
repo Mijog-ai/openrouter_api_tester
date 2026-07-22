@@ -72,6 +72,16 @@ class OpenRouterClient:
             raise OpenRouterError("Unexpected response shape from /models")
         return data
 
+    def fetch_bytes(self, url: str) -> bytes:
+        """Download raw bytes from an http(s) URL (for remote image results)."""
+        try:
+            resp = requests.get(url, timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise OpenRouterError(f"Failed to download image: {exc}") from exc
+        if resp.status_code != 200:
+            raise OpenRouterError(f"Image download failed ({resp.status_code}).")
+        return resp.content
+
     # ------------------------------------------------------------------ #
     # Chat completions
     # ------------------------------------------------------------------ #
@@ -255,3 +265,64 @@ def _extract_delta_text(chunk: dict[str, Any]) -> Iterable[str]:
                 text = part.get("text") if isinstance(part, dict) else None
                 if text:
                     yield text
+
+
+def extract_image_urls(message: dict[str, Any]) -> list[str]:
+    """Collect image URLs from an assistant message, checking every known shape.
+
+    Different providers place generated images in different spots, so we look
+    in all of them:
+
+    * ``message["images"]``: ``[{"image_url": {"url": ...}}]`` or ``[{"url": ...}]``
+    * ``message["content"]`` when it's a list of parts with ``image_url``
+    * any ``data:image`` or ``http(s)`` image URL embedded in a content string
+
+    Returns a de-duplicated list of URLs (data: or http(s)).
+    """
+    urls: list[str] = []
+
+    def add(url: Any) -> None:
+        if isinstance(url, str) and url and url not in urls:
+            urls.append(url)
+
+    # 1) Dedicated images array.
+    for img in message.get("images") or []:
+        if isinstance(img, dict):
+            add((img.get("image_url") or {}).get("url"))
+            add(img.get("url"))
+        elif isinstance(img, str):
+            add(img)
+
+    # 2) Structured content parts.
+    content = message.get("content")
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in ("image_url", "image"):
+                add((part.get("image_url") or {}).get("url"))
+                add(part.get("url"))
+
+    # 3) Image URLs embedded in a plain-text content string (markdown etc.).
+    if isinstance(content, str) and content:
+        import re
+
+        for m in re.findall(r"data:image/[^\s\)\"']+", content):
+            add(m)
+        for m in re.findall(r"https?://[^\s\)\"']+\.(?:png|jpe?g|webp|gif)", content):
+            add(m)
+
+    return urls
+
+
+def message_text(message: dict[str, Any]) -> str:
+    """Return the plain-text portion of an assistant message, if any."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            p.get("text", "")
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        ]
+        return " ".join(t for t in parts if t)
+    return ""

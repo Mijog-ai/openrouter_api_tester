@@ -1,2 +1,7 @@
 PyQt6>=6.6
 requests>=2.31
+
+# Optional: video playback in the Video tab. PyQt6 usually pulls this in, but
+# on some systems it must be installed explicitly. Playback also needs OS media
+# plugins (e.g. GStreamer on Linux, Media Foundation on Windows).
+# PyQt6-Qt6 provides the QtMultimedia libraries.

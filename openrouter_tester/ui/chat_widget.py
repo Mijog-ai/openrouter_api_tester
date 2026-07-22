@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..catalog import Model
-from ..client import OpenRouterClient
+from ..client import OpenRouterClient, extract_image_urls, message_text
 from ..workers import ChatWorker, CompletionWorker
 
 
@@ -381,20 +381,16 @@ class ChatWidget(QWidget):
         self._cleanup_worker()
 
     def _on_image_message(self, message: dict) -> None:
-        images = message.get("images") or []
-        content = message.get("content")
-        text = content if isinstance(content, str) else ""
+        text = message_text(message)
         img_keys: list[str] = []
-        for img in images:
-            url = ""
-            if isinstance(img, dict):
-                url = (img.get("image_url") or {}).get("url", "") or img.get("url", "")
-            if url:
-                key = self._store_data_url_image(url)
-                if key:
-                    img_keys.append(key)
+        for url in extract_image_urls(message):
+            # Chat renders inline; only data URLs are decoded here. Remote URLs
+            # are handled in the dedicated Image tab (which downloads them).
+            key = self._store_data_url_image(url)
+            if key:
+                img_keys.append(key)
         if not img_keys and not text:
-            text = "(model returned no image or text)"
+            text = "(model returned no image or text — try the Image tab)"
         self._turns.append({"role": "assistant", "text": text, "img_keys": img_keys})
         self._assistant_buffer = ""
         self._render_all()

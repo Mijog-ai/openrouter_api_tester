@@ -30,7 +30,15 @@ vision/multimodal, image generation, document/file) is supported.
   render audio. Multimodal models that merely *accept* audio input but reply in
   text/image (e.g. Gemini) are **kept** and fully usable via their other
   modalities (audio input just isn't offered in the UI).
-- **Adaptive playground** — the chat panel reshapes itself to the selected
+- **Four focused tabs** — **Chat**, **Image**, **Video**, **Batch Test**:
+  - **Image** — a dead-simple generator: pick an image model, type a prompt,
+    click Generate, see the picture large, and **Save** it. Images are found in
+    every response shape (dedicated `images` array, content parts, or an image
+    URL embedded in text) and remote image URLs are downloaded automatically.
+  - **Video** — OpenRouter has **no video-generation** models, so this is for
+    video *understanding*: open a local clip, **play it in-window**
+    (QtMultimedia), and send it to a video-capable model to ask about it.
+- **Adaptive Chat playground** — the chat panel reshapes itself to the selected
   model:
   - **Text** → plain streaming chat.
   - **Vision/Multimodal** → an **Attach image** button; the image is sent
@@ -93,6 +101,8 @@ openrouter_tester/
 └── ui/
     ├── main_window.py        # tabs, model browser, preload/refresh wiring
     ├── chat_widget.py        # adaptive chat playground (+ inline image rendering)
+    ├── image_studio.py       # dedicated image-generation view (+ Save)
+    ├── video_studio.py       # video playback + video-input testing
     └── batch_test_widget.py  # batch tester table
 ```
 
