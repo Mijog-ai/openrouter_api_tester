@@ -164,12 +164,14 @@ class BatchTestWorker(QThread):
     def _probe(self, model: Model) -> tuple[bool, float, str]:
         messages = [{"role": "user", "content": self._prompt}]
         modalities = ["image", "text"] if model.generates_images else None
+        # Image models often reject sampling params; omit temperature for them.
+        temperature = None if model.generates_images else 0.2
         start = time.perf_counter()
         try:
             message = self._client.chat_completion(
                 model.id,
                 messages,
-                temperature=0.2,
+                temperature=temperature,
                 max_tokens=self._max_tokens,
                 modalities=modalities,
             )

@@ -80,7 +80,7 @@ class OpenRouterClient:
         model: str,
         messages: list[dict[str, Any]],
         *,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         max_tokens: int | None = None,
         should_stop: Callable[[], bool] | None = None,
     ) -> Iterator[str]:
@@ -90,39 +90,20 @@ class OpenRouterClient:
         dict with ``role`` and ``content`` where content may be a plain string
         or a list of content parts (for multimodal / vision requests).
 
+        ``temperature`` of ``None`` omits the parameter entirely. If a model
+        rejects an optional parameter (e.g. some models don't accept
+        ``temperature``), the request is retried once without it.
+
         ``should_stop`` is polled between chunks so a GUI thread can cancel an
         in-flight generation.
         """
-        if not self.api_key:
-            raise OpenRouterError("An OpenRouter API key is required to run chats.")
-
-        url = f"{BASE_URL}/chat/completions"
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": True,
-        }
+        body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        if temperature is not None:
+            body["temperature"] = temperature
         if max_tokens:
             body["max_tokens"] = max_tokens
 
-        try:
-            resp = requests.post(
-                url,
-                headers=self._headers({"Content-Type": "application/json"}),
-                data=json.dumps(body),
-                stream=True,
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise OpenRouterError(f"Request failed: {exc}") from exc
-
-        if resp.status_code != 200:
-            # Read the (small) error body eagerly for a useful message.
-            detail = resp.text[:500]
-            resp.close()
-            raise OpenRouterError(f"Chat request failed ({resp.status_code}): {detail}")
-
+        resp = self._post_chat(body, stream=True)
         yield from self._iter_sse(resp, should_stop)
 
     def chat_completion(
@@ -130,7 +111,7 @@ class OpenRouterClient:
         model: str,
         messages: list[dict[str, Any]],
         *,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         max_tokens: int | None = None,
         modalities: list[str] | None = None,
     ) -> dict[str, Any]:
@@ -140,37 +121,20 @@ class OpenRouterClient:
         contain ``content`` text and/or an ``images`` list for image-generation
         models), augmented with a top-level ``usage`` key when present.
 
+        ``temperature`` of ``None`` omits the parameter. Parameters a model
+        rejects as unsupported are stripped and the request retried.
         ``modalities`` lets callers request image output, e.g.
         ``["image", "text"]`` for image-generation models.
         """
-        if not self.api_key:
-            raise OpenRouterError("An OpenRouter API key is required to run chats.")
-
-        url = f"{BASE_URL}/chat/completions"
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-        }
+        body: dict[str, Any] = {"model": model, "messages": messages}
+        if temperature is not None:
+            body["temperature"] = temperature
         if max_tokens:
             body["max_tokens"] = max_tokens
         if modalities:
             body["modalities"] = modalities
 
-        try:
-            resp = requests.post(
-                url,
-                headers=self._headers({"Content-Type": "application/json"}),
-                data=json.dumps(body),
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise OpenRouterError(f"Request failed: {exc}") from exc
-
-        if resp.status_code != 200:
-            raise OpenRouterError(
-                f"Chat request failed ({resp.status_code}): {resp.text[:500]}"
-            )
+        resp = self._post_chat(body, stream=False)
 
         payload = resp.json()
         choices = payload.get("choices") or []
@@ -184,6 +148,67 @@ class OpenRouterClient:
         if "usage" in payload:
             message["usage"] = payload["usage"]
         return message
+
+    # Optional parameters we're willing to drop and retry without if a model
+    # reports them as unsupported. Never strip model/messages.
+    _RETRYABLE_PARAMS = ("temperature", "max_tokens", "top_p", "modalities")
+
+    def _post_chat(self, body: dict[str, Any], *, stream: bool) -> requests.Response:
+        """POST to /chat/completions, retrying without unsupported parameters.
+
+        Some providers reject optional sampling parameters (e.g. GPT-5 image
+        rejects ``temperature``). On a 400 that names an unsupported parameter,
+        we remove it and retry, up to a few times.
+        """
+        if not self.api_key:
+            raise OpenRouterError("An OpenRouter API key is required to run chats.")
+
+        url = f"{BASE_URL}/chat/completions"
+        body = dict(body)
+        for _ in range(len(self._RETRYABLE_PARAMS) + 1):
+            try:
+                resp = requests.post(
+                    url,
+                    headers=self._headers({"Content-Type": "application/json"}),
+                    data=json.dumps(body),
+                    stream=stream,
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as exc:
+                raise OpenRouterError(f"Request failed: {exc}") from exc
+
+            if resp.status_code == 200:
+                return resp
+
+            detail = resp.text[:800]
+            resp.close()
+            dropped = self._strip_unsupported_param(body, detail)
+            if not dropped:
+                raise OpenRouterError(
+                    f"Chat request failed ({resp.status_code}): {detail}"
+                )
+            # else: loop and retry without the offending parameter.
+
+        raise OpenRouterError("Chat request failed after stripping parameters.")
+
+    @classmethod
+    def _strip_unsupported_param(cls, body: dict[str, Any], error_text: str) -> bool:
+        """Remove a parameter the error names as unsupported. Return True if one
+        was removed."""
+        lowered = error_text.lower()
+        if "unsupported" not in lowered and "not supported" not in lowered:
+            return False
+        for param in cls._RETRYABLE_PARAMS:
+            if param in body and f"'{param}'" in error_text:
+                body.pop(param, None)
+                return True
+        # Fall back: if the message clearly flags a parameter we set but didn't
+        # match by quotes, drop the first retryable param present.
+        for param in cls._RETRYABLE_PARAMS:
+            if param in body and param in lowered:
+                body.pop(param, None)
+                return True
+        return False
 
     @staticmethod
     def _iter_sse(

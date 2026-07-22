@@ -330,9 +330,11 @@ class ChatWidget(QWidget):
     def _start_image_generation(self, messages, max_tokens) -> None:
         self._assistant_buffer = "Generating image…"
         self._render_all()
+        # Image models commonly reject sampling params like temperature, so we
+        # omit it here (the client also retries defensively if any slips through).
         worker = CompletionWorker(
             self._client, self._model.id, messages,
-            temperature=self._temp_spin.value(), max_tokens=max_tokens,
+            temperature=None, max_tokens=max_tokens,
             modalities=["image", "text"],
         )
         worker.finished_ok.connect(self._on_image_message)
