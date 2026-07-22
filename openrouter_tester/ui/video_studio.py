@@ -268,31 +268,97 @@ class VideoStudioWidget(QWidget):
             )
             return
 
-        body: dict = {"model": model.id, "prompt": prompt}
-        if self._duration.currentData() is not None:
-            body["duration"] = self._duration.currentData()
-        if self._resolution.currentData() is not None:
-            body["resolution"] = self._resolution.currentData()
-        if self._aspect.currentData() is not None:
-            body["aspect_ratio"] = self._aspect.currentData()
-        if self._audio_check.isEnabled():
-            body["generate_audio"] = self._audio_check.isChecked()
+        duration = self._duration.currentData()
+        resolution = self._resolution.currentData()
+        aspect = self._aspect.currentData()
+        audio = self._audio_check.isChecked() if self._audio_check.isEnabled() else None
+
+        frame_images = None
         if self._first_frame_data_url and model.supports_image_to_video:
-            body["frame_images"] = [
+            frame_images = [
                 {
                     "frame_type": "first_frame",
                     "image_url": {"url": self._first_frame_data_url},
                 }
             ]
 
-        self._last_body = body
+        def make_body(**extra) -> dict:
+            b: dict = {"model": model.id, "prompt": prompt}
+            if audio is not None:
+                b["generate_audio"] = audio
+            if frame_images is not None:
+                b["frame_images"] = frame_images
+            b.update({k: v for k, v in extra.items() if v is not None})
+            return b
+
+        # Fallback ladder: try resolution+aspect first (documented shape), then
+        # `size` (which some providers like Wan expect), then minimal.
+        bodies = [make_body(duration=duration, resolution=resolution, aspect_ratio=aspect)]
+        size = self._best_size(model, resolution, aspect)
+        if size:
+            bodies.append(make_body(duration=duration, size=size))
+        bodies.append(make_body(duration=duration))
+        bodies.append(make_body())  # last resort: model + prompt only
+
+        # De-duplicate while preserving order.
+        seen, ladder = [], []
+        for b in bodies:
+            key = tuple(sorted((k, str(v)) for k, v in b.items() if k != "frame_images"))
+            if key not in seen:
+                seen.append(key)
+                ladder.append(b)
+
+        self._last_body = ladder[0]
         self._set_busy(True)
         self._status.setText("Submitting job…")
-        self._gen_worker = VideoGenWorker(self._client, body)
+        self._gen_worker = VideoGenWorker(self._client, ladder)
         self._gen_worker.status.connect(self._status.setText)
         self._gen_worker.finished_ok.connect(self._on_generated)
         self._gen_worker.failed.connect(self._on_failed)
         self._gen_worker.start()
+
+    @staticmethod
+    def _best_size(model: VideoModel, resolution, aspect) -> str | None:
+        """Pick a supported ``WxH`` size matching resolution+aspect if possible."""
+        sizes = model.raw.get("supported_sizes") or []
+        if not sizes:
+            return None
+        # Height implied by the resolution label (e.g. 720p -> 720).
+        want_h = None
+        if isinstance(resolution, str) and resolution.endswith("p"):
+            try:
+                want_h = int(resolution[:-1])
+            except ValueError:
+                want_h = None
+        # Aspect landscape vs portrait.
+        want_landscape = None
+        if isinstance(aspect, str) and ":" in aspect:
+            try:
+                w, h = (int(x) for x in aspect.split(":", 1))
+                want_landscape = w >= h
+            except ValueError:
+                want_landscape = None
+
+        def parse(s):
+            try:
+                w, h = (int(x) for x in s.lower().split("x", 1))
+                return w, h
+            except ValueError:
+                return None
+
+        best = None
+        for s in sizes:
+            wh = parse(s)
+            if not wh:
+                continue
+            w, h = wh
+            if want_h is not None and min(w, h) != want_h:
+                continue
+            if want_landscape is not None and (w >= h) != want_landscape:
+                continue
+            best = s
+            break
+        return best or (sizes[0] if sizes else None)
 
     def _on_cancel(self) -> None:
         if self._gen_worker is not None:

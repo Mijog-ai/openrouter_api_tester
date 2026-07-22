@@ -226,14 +226,15 @@ class VideoGenWorker(QThread):
     def __init__(
         self,
         client: OpenRouterClient,
-        body: dict[str, Any],
+        bodies: list[dict[str, Any]] | dict[str, Any],
         *,
         poll_seconds: float = 4.0,
         timeout_seconds: float = 600.0,
     ) -> None:
         super().__init__()
         self._client = client
-        self._body = body
+        # Accept either a single body or a fallback ladder of candidate bodies.
+        self._bodies = [bodies] if isinstance(bodies, dict) else list(bodies)
         self._poll = poll_seconds
         self._timeout = timeout_seconds
         self._stop_requested = False
@@ -241,10 +242,28 @@ class VideoGenWorker(QThread):
     def request_stop(self) -> None:
         self._stop_requested = True
 
+    def _create_with_fallback(self) -> dict[str, Any]:
+        """Try each candidate body; on a 400 move to the next. Raise otherwise."""
+        last_error: OpenRouterError | None = None
+        for i, body in enumerate(self._bodies):
+            if self._stop_requested:
+                raise OpenRouterError("Cancelled.")
+            if i > 0:
+                self.status.emit(f"Retrying with an alternate request ({i + 1})…")
+            try:
+                return self._client.create_video_job(body)
+            except OpenRouterError as exc:
+                # Only a 400 (bad params, no job created) is worth retrying.
+                if "(400" in str(exc):
+                    last_error = exc
+                    continue
+                raise
+        raise last_error or OpenRouterError("Video job creation failed.")
+
     def run(self) -> None:
         try:
             self.status.emit("Submitting job…")
-            created = self._client.create_video_job(self._body)
+            created = self._create_with_fallback()
         except OpenRouterError as exc:
             self.failed.emit(str(exc))
             return
