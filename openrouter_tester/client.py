@@ -125,6 +125,66 @@ class OpenRouterClient:
 
         yield from self._iter_sse(resp, should_stop)
 
+    def chat_completion(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        modalities: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Run a single non-streaming chat completion.
+
+        Returns the assistant ``message`` object from ``choices[0]`` (which may
+        contain ``content`` text and/or an ``images`` list for image-generation
+        models), augmented with a top-level ``usage`` key when present.
+
+        ``modalities`` lets callers request image output, e.g.
+        ``["image", "text"]`` for image-generation models.
+        """
+        if not self.api_key:
+            raise OpenRouterError("An OpenRouter API key is required to run chats.")
+
+        url = f"{BASE_URL}/chat/completions"
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if max_tokens:
+            body["max_tokens"] = max_tokens
+        if modalities:
+            body["modalities"] = modalities
+
+        try:
+            resp = requests.post(
+                url,
+                headers=self._headers({"Content-Type": "application/json"}),
+                data=json.dumps(body),
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise OpenRouterError(f"Request failed: {exc}") from exc
+
+        if resp.status_code != 200:
+            raise OpenRouterError(
+                f"Chat request failed ({resp.status_code}): {resp.text[:500]}"
+            )
+
+        payload = resp.json()
+        choices = payload.get("choices") or []
+        if not choices:
+            # Some errors come back 200 with an ``error`` field.
+            err = payload.get("error")
+            if err:
+                raise OpenRouterError(str(err.get("message") or err))
+            raise OpenRouterError("No choices returned by the model.")
+        message = dict(choices[0].get("message") or {})
+        if "usage" in payload:
+            message["usage"] = payload["usage"]
+        return message
+
     @staticmethod
     def _iter_sse(
         resp: requests.Response,

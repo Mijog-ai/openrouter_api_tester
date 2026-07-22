@@ -8,8 +8,14 @@ project requirement to test every model type *except* audio.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+# Bundled preload of the model list so the app has data instantly on launch,
+# even offline. Regenerate with ``python scripts/fetch_models.py``.
+CACHE_PATH = Path(__file__).resolve().parent / "data" / "models.json"
 
 # Category identifiers (ordering here drives display order in the sidebar).
 CAT_IMAGE_GEN = "Image Generation"
@@ -152,3 +158,33 @@ def build_catalog(raw_models: list[dict[str, Any]]) -> dict[str, list[Model]]:
 
     # Drop empty categories while preserving order.
     return {cat: buckets[cat] for cat in CATEGORY_ORDER if buckets.get(cat)}
+
+
+def flatten(catalog: dict[str, list[Model]]) -> list[Model]:
+    """Return all models in a catalog as a single flat list (category order)."""
+    return [model for models in catalog.values() for model in models]
+
+
+def load_cached_raw() -> tuple[list[dict[str, Any]], str]:
+    """Load the bundled model preload.
+
+    Returns ``(raw_models, generated_at)``. If the cache is missing or
+    unreadable, returns ``([], "")`` so the caller can fall back to the network.
+    """
+    try:
+        with CACHE_PATH.open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return [], ""
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        return [], ""
+    return data, payload.get("generated_at", "")
+
+
+def save_cache(raw_models: list[dict[str, Any]], generated_at: str) -> None:
+    """Persist the raw model list as the bundled preload."""
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"generated_at": generated_at, "data": raw_models}
+    with CACHE_PATH.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=1, ensure_ascii=False)

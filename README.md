@@ -1,27 +1,42 @@
 # OpenRouter API Tester
 
 A PyQt6 desktop app that loads **every model available on
-[OpenRouter](https://openrouter.ai)**, groups them by type, and gives you a
-chat playground to test any of them through the OpenRouter API.
+[OpenRouter](https://openrouter.ai)**, groups them by type, and gives you an
+**adaptive playground** and a **batch tester** to exercise any of them through
+the OpenRouter API.
 
 Audio models are intentionally excluded — every other model type (text,
 vision/multimodal, image generation, document/file) is supported.
 
 ## Features
 
-- **Live model catalog** — pulls the full model list from
-  `GET /api/v1/models` and sorts each model into a category based on its
-  input/output modalities:
+- **Bundled preload** — the full model list ships in
+  `openrouter_tester/data/models.json`, so the app is populated **instantly on
+  launch (even offline)**. It then refreshes from the live
+  `GET /api/v1/models` in the background and rewrites the preload.
+- **Categorised catalog** — each model is sorted by its input/output
+  modalities:
   - **Text** — text-in / text-out chat models
   - **Vision / Multimodal** — accept image or video input
   - **Image Generation** — produce images as output
   - **Document / File** — accept file/PDF input
 - **Audio filtered out** — any model with audio input or output is dropped.
+- **Adaptive playground** — the chat panel reshapes itself to the selected
+  model:
+  - **Text** → plain streaming chat.
+  - **Vision/Multimodal** → an **Attach image** button; the image is sent
+    inline as a base64 data URL and shown in the transcript.
+  - **Document/File** → an **Attach file** button (PDF, txt, csv, json…) sent
+    as an OpenRouter `file` content part.
+  - **Image Generation** → the button becomes **Generate**; the request asks
+    for image output (`modalities: ["image","text"]`) and returned images are
+    **rendered inline** in the transcript.
+- **Batch Test tab** — pick a category (or *All*), cap how many models to hit,
+  and run one small prompt against each. Results stream into a table with
+  **pass/fail, latency, and a response snippet** (image models are checked for
+  a returned image). Runs sequentially to stay rate-limit friendly, and can be
+  stopped mid-run.
 - **Search & filter** — filter by name/id, or show only free models.
-- **Chat playground** — pick a model and chat with it. Responses stream token
-  by token; temperature and max-tokens are adjustable.
-- **Image attachments** — for vision-capable models, attach an image that is
-  sent inline (base64 data URL) with your next message.
 - **Rich model info** — hover a model to see its id, context length, pricing,
   and description.
 
@@ -44,19 +59,32 @@ python main.py
 
 Get an API key at https://openrouter.ai/keys.
 
-> The model list loads without a key, but running a chat requires one.
+> The model list loads without a key (from the preload or the public models
+> endpoint), but running a chat or a batch test requires one.
+
+### Refreshing the bundled preload
+
+The app updates the preload automatically after each successful live refresh.
+To regenerate it manually (e.g. to commit an updated snapshot):
+
+```bash
+python scripts/fetch_models.py
+```
 
 ## Project layout
 
 ```
 main.py                       # entry point
+scripts/fetch_models.py       # regenerate the bundled model preload
 openrouter_tester/
-├── client.py                 # OpenRouter REST client (models + streaming chat)
-├── catalog.py                # model normalisation + categorisation (audio excluded)
-├── workers.py                # QThread workers (non-blocking network I/O)
+├── client.py                 # OpenRouter REST client (models, streaming + non-streaming chat)
+├── catalog.py                # model normalisation, categorisation, preload cache
+├── workers.py                # QThread workers (fetch, streaming chat, image-gen, batch test)
+├── data/models.json          # bundled model preload
 └── ui/
-    ├── main_window.py        # model browser + top bar wiring
-    └── chat_widget.py        # chat playground panel
+    ├── main_window.py        # tabs, model browser, preload/refresh wiring
+    ├── chat_widget.py        # adaptive chat playground (+ inline image rendering)
+    └── batch_test_widget.py  # batch tester table
 ```
 
 ## How categorisation works
@@ -74,9 +102,12 @@ Any model whose input *or* output modalities include `audio` is excluded.
 
 ## Notes
 
-- Chat requests use OpenRouter's OpenAI-compatible
-  `POST /api/v1/chat/completions` endpoint with `stream: true`.
+- Streaming chats use the OpenAI-compatible
+  `POST /api/v1/chat/completions` endpoint with `stream: true`; image
+  generation and batch probes use the same endpoint non-streamed.
 - Network calls run on background `QThread`s so the UI stays responsive, and
-  in-flight generations can be cancelled with **Stop**.
+  in-flight streaming generations can be cancelled with **Stop**.
 - Your API key is only held in memory / read from the environment; it is never
   written to disk by the app.
+- The **Max models** cap in the Batch Test tab exists to protect your credits —
+  raise it deliberately before probing hundreds of paid models.

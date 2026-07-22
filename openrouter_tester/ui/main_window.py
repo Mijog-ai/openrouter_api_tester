@@ -1,4 +1,14 @@
-"""Main application window: model browser (left) + chat playground (right)."""
+"""Main application window.
+
+Layout: a top bar (API key + refresh) over a tabbed area:
+
+* **Playground** — model browser on the left, adaptive chat panel on the right.
+* **Batch Test** — probe many models at once and tabulate pass/fail + latency.
+
+On startup the bundled model preload (``data/models.json``) is loaded instantly
+so the UI is populated offline, then a background refresh updates it from the
+live OpenRouter API.
+"""
 
 from __future__ import annotations
 
@@ -13,15 +23,23 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSplitter,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from ..catalog import CATEGORY_DESCRIPTIONS, Model, build_catalog
+from ..catalog import (
+    CATEGORY_DESCRIPTIONS,
+    Model,
+    build_catalog,
+    load_cached_raw,
+    save_cache,
+)
 from ..client import OpenRouterClient
 from ..workers import ModelFetchWorker
+from .batch_test_widget import BatchTestWidget
 from .chat_widget import ChatWidget
 
 _MODEL_ROLE = Qt.ItemDataRole.UserRole
@@ -31,7 +49,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("OpenRouter API Tester")
-        self.resize(1150, 720)
+        self.resize(1200, 760)
 
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
         self._client = OpenRouterClient(api_key=api_key)
@@ -41,7 +59,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         if api_key:
             self._key_input.setText(api_key)
-        # Kick off an initial load (models endpoint works without a key).
+
+        # Preload instantly from the bundled cache, then refresh from network.
+        raw, generated_at = load_cached_raw()
+        if raw:
+            self._apply_models(raw, source=f"preload ({generated_at or 'bundled'})")
         self.refresh_models()
 
     # ------------------------------------------------------------------ #
@@ -53,7 +75,7 @@ class MainWindow(QMainWindow):
         outer = QVBoxLayout(central)
         outer.setContentsMargins(8, 8, 8, 8)
 
-        # --- top bar: API key + refresh ------------------------------- #
+        # --- top bar ---------------------------------------------------- #
         top = QHBoxLayout()
         top.addWidget(QLabel("OpenRouter API key:"))
         self._key_input = QLineEdit()
@@ -67,10 +89,19 @@ class MainWindow(QMainWindow):
         top.addWidget(self._refresh_btn)
         outer.addLayout(top)
 
-        # --- main splitter -------------------------------------------- #
+        # --- tabs ------------------------------------------------------- #
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._build_playground_tab(), "Playground")
+
+        self._batch = BatchTestWidget(self._client)
+        self._tabs.addTab(self._batch, "Batch Test")
+        outer.addWidget(self._tabs, stretch=1)
+
+        self.statusBar().showMessage("Ready.")
+
+    def _build_playground_tab(self) -> QWidget:
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left: search + tree.
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -92,16 +123,18 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(left)
 
-        # Right: chat playground.
         self._chat = ChatWidget(self._client)
         splitter.addWidget(self._chat)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([340, 810])
-        outer.addWidget(splitter, stretch=1)
+        splitter.setSizes([340, 820])
 
-        self.statusBar().showMessage("Ready.")
+        wrapper = QWidget()
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.addWidget(splitter)
+        return wrapper
 
     # ------------------------------------------------------------------ #
     # API key handling
@@ -116,25 +149,48 @@ class MainWindow(QMainWindow):
         if self._fetch_worker is not None:
             return
         self._refresh_btn.setEnabled(False)
-        self.statusBar().showMessage("Loading models from OpenRouter…")
+        self.statusBar().showMessage("Refreshing models from OpenRouter…")
         self._fetch_worker = ModelFetchWorker(self._client)
         self._fetch_worker.finished_ok.connect(self._on_models_loaded)
         self._fetch_worker.failed.connect(self._on_models_failed)
         self._fetch_worker.start()
 
     def _on_models_loaded(self, raw_models: list) -> None:
-        self._catalog = build_catalog(raw_models)
-        total = sum(len(v) for v in self._catalog.values())
-        self._populate_tree()
-        self.statusBar().showMessage(
-            f"Loaded {total} models across {len(self._catalog)} categories "
-            f"(audio models excluded)."
-        )
+        self._apply_models(raw_models, source="live")
+        # Update the bundled preload so next launch starts fresh.
+        try:
+            from datetime import datetime, timezone
+
+            save_cache(
+                raw_models,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            )
+        except OSError:
+            pass  # cache is a convenience; ignore write failures
         self._cleanup_fetch_worker()
 
     def _on_models_failed(self, message: str) -> None:
-        self.statusBar().showMessage(f"Failed to load models: {message}")
+        if self._catalog:
+            self.statusBar().showMessage(
+                f"Using preloaded models (live refresh failed: {message})"
+            )
+        else:
+            self.statusBar().showMessage(f"Failed to load models: {message}")
         self._cleanup_fetch_worker()
+
+    def _apply_models(self, raw_models: list, *, source: str) -> None:
+        # Preserve the current selection across a refresh, if possible.
+        selected_id = self._current_model_id()
+        self._catalog = build_catalog(raw_models)
+        total = sum(len(v) for v in self._catalog.values())
+        self._populate_tree()
+        self._batch.set_catalog(self._catalog)
+        if selected_id:
+            self._reselect(selected_id)
+        self.statusBar().showMessage(
+            f"{total} models across {len(self._catalog)} categories "
+            f"(audio excluded) · source: {source}"
+        )
 
     def _cleanup_fetch_worker(self) -> None:
         if self._fetch_worker is not None:
@@ -208,11 +264,26 @@ class MainWindow(QMainWindow):
             f"{model.context_length:,} ctx"
         )
 
+    def _current_model_id(self) -> str | None:
+        items = self._tree.selectedItems()
+        if items and (model := items[0].data(0, _MODEL_ROLE)) is not None:
+            return model.id
+        return None
+
+    def _reselect(self, model_id: str) -> None:
+        for i in range(self._tree.topLevelItemCount()):
+            cat_item = self._tree.topLevelItem(i)
+            for j in range(cat_item.childCount()):
+                child = cat_item.child(j)
+                model: Model = child.data(0, _MODEL_ROLE)
+                if model.id == model_id:
+                    self._tree.setCurrentItem(child)
+                    return
+
     # ------------------------------------------------------------------ #
     # Qt lifecycle
     # ------------------------------------------------------------------ #
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        # Make sure background threads are stopped before we exit.
         if self._fetch_worker is not None:
             self._fetch_worker.wait(200)
         super().closeEvent(event)
