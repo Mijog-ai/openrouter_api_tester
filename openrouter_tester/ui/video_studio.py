@@ -275,8 +275,11 @@ class VideoStudioWidget(QWidget):
 
         frame_images = None
         if self._first_frame_data_url and model.supports_image_to_video:
+            # Per the API schema each frame image needs all three fields:
+            # type == "image_url", the image_url object, and frame_type.
             frame_images = [
                 {
+                    "type": "image_url",
                     "frame_type": "first_frame",
                     "image_url": {"url": self._first_frame_data_url},
                 }
