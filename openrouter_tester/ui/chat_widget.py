@@ -431,7 +431,11 @@ class ChatWidget(QWidget):
         image = QImage()
         if not image.loadFromData(raw):
             return None
-        key = f"orimg://{self._img_counter}"
+        # NOTE: use an opaque "scheme:path" URL (no "//"). A URL like
+        # "orimg://0" would be parsed by QUrl as having host "0", which Qt
+        # normalises to the IP "0.0.0.0" — breaking the resource lookup and
+        # showing a broken-image icon.
+        key = f"orimg:{self._img_counter}"
         self._img_counter += 1
         self._transcript.register_image(key, image)
         return key
