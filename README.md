@@ -10,10 +10,13 @@ vision/multimodal, image generation, document/file) is supported.
 
 ## Features
 
-- **Bundled preload** — the full model list ships in
-  `openrouter_tester/data/models.json`, so the app is populated **instantly on
-  launch (even offline)**. It then refreshes from the live
-  `GET /api/v1/models` in the background and rewrites the preload.
+- **Always live, with an instant preload** — the full model list ships in
+  `openrouter_tester/data/models.json` for a responsive first paint (and offline
+  use), but the app **always fetches the live `GET /api/v1/models` on launch**;
+  the live list is the source of truth and rewrites the preload. A colour-coded
+  indicator in the top bar shows the current source: **● Live** (green),
+  **● Cached preload** / **● Preload (live failed)** (amber, with the error in
+  its tooltip), or **● Load failed** (red). Hit **Refresh models** to re-fetch.
 - **Categorised catalog** — each model is sorted by its input/output
   modalities:
   - **Text** — text-in / text-out chat models

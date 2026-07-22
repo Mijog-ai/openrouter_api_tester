@@ -55,15 +55,18 @@ class MainWindow(QMainWindow):
         self._client = OpenRouterClient(api_key=api_key)
         self._catalog: dict[str, list[Model]] = {}
         self._fetch_worker: ModelFetchWorker | None = None
+        self._live = False
 
         self._build_ui()
         if api_key:
             self._key_input.setText(api_key)
 
-        # Preload instantly from the bundled cache, then refresh from network.
+        # Preload instantly from the bundled cache for a responsive first paint,
+        # then always fetch the live list from OpenRouter (the source of truth).
         raw, generated_at = load_cached_raw()
         if raw:
             self._apply_models(raw, source=f"preload ({generated_at or 'bundled'})")
+            self._set_source_indicator("cached", f"Preload generated {generated_at}")
         self.refresh_models()
 
     # ------------------------------------------------------------------ #
@@ -83,6 +86,14 @@ class MainWindow(QMainWindow):
         self._key_input.setPlaceholderText("sk-or-…  (or set OPENROUTER_API_KEY)")
         self._key_input.textChanged.connect(self._on_key_changed)
         top.addWidget(self._key_input, stretch=1)
+
+        # Live/cached source indicator.
+        self._source_label = QLabel("…")
+        self._source_label.setToolTip(
+            "Whether the model list is live from OpenRouter or the bundled "
+            "offline preload."
+        )
+        top.addWidget(self._source_label)
 
         self._refresh_btn = QPushButton("Refresh models")
         self._refresh_btn.clicked.connect(self.refresh_models)
@@ -149,15 +160,19 @@ class MainWindow(QMainWindow):
         if self._fetch_worker is not None:
             return
         self._refresh_btn.setEnabled(False)
-        self.statusBar().showMessage("Refreshing models from OpenRouter…")
+        self._set_source_indicator("loading")
+        self.statusBar().showMessage("Fetching live models from OpenRouter…")
         self._fetch_worker = ModelFetchWorker(self._client)
         self._fetch_worker.finished_ok.connect(self._on_models_loaded)
         self._fetch_worker.failed.connect(self._on_models_failed)
         self._fetch_worker.start()
 
     def _on_models_loaded(self, raw_models: list) -> None:
+        # Live data is the source of truth; it replaces whatever the preload
+        # showed and becomes the new offline fallback for next launch.
+        self._live = True
         self._apply_models(raw_models, source="live")
-        # Update the bundled preload so next launch starts fresh.
+        self._set_source_indicator("live")
         try:
             from datetime import datetime, timezone
 
@@ -170,13 +185,32 @@ class MainWindow(QMainWindow):
         self._cleanup_fetch_worker()
 
     def _on_models_failed(self, message: str) -> None:
+        self._live = False
         if self._catalog:
+            self._set_source_indicator("stale", message)
             self.statusBar().showMessage(
-                f"Using preloaded models (live refresh failed: {message})"
+                f"Live refresh failed ({message}). Showing bundled preload — "
+                f"click 'Refresh models' to retry."
             )
         else:
+            self._set_source_indicator("error", message)
             self.statusBar().showMessage(f"Failed to load models: {message}")
         self._cleanup_fetch_worker()
+
+    def _set_source_indicator(self, state: str, detail: str = "") -> None:
+        """Show whether the list is live, from the preload, loading, or failed."""
+        styles = {
+            "live": ("#3fb950", "● Live"),
+            "cached": ("#d29922", "● Cached preload"),
+            "stale": ("#d29922", "● Preload (live failed)"),
+            "loading": ("#8b949e", "● Fetching live…"),
+            "error": ("#f85149", "● Load failed"),
+        }
+        color, text = styles.get(state, ("#8b949e", "…"))
+        self._source_label.setStyleSheet(f"color: {color}; font-weight: 600;")
+        self._source_label.setText(text)
+        if detail:
+            self._source_label.setToolTip(detail)
 
     def _apply_models(self, raw_models: list, *, source: str) -> None:
         # Preserve the current selection across a refresh, if possible.
