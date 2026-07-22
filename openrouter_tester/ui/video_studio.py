@@ -62,6 +62,7 @@ class VideoStudioWidget(QWidget):
         self._mp4_bytes: bytes | None = None
         self._tmp_path: str | None = None
         self._first_frame_data_url: str | None = None
+        self._last_body: dict | None = None
         self._build_ui()
 
     # ------------------------------------------------------------------ #
@@ -215,6 +216,15 @@ class VideoStudioWidget(QWidget):
             self._resolution.addItem(r, r)
         for a in m.supported_aspect_ratios:
             self._aspect.addItem(a, a)
+        # Preselect the first real supported value (index 1) rather than the
+        # "(default)" placeholder, so a valid value is always sent — several
+        # models reject a job that omits duration/resolution/aspect.
+        if self._duration.count() > 1:
+            self._duration.setCurrentIndex(1)
+        if self._resolution.count() > 1:
+            self._resolution.setCurrentIndex(1)
+        if self._aspect.count() > 1:
+            self._aspect.setCurrentIndex(1)
         self._audio_check.setChecked(m.generate_audio)
         self._audio_check.setEnabled(m.generate_audio)
         self._frame_btn.setVisible(m.supports_image_to_video)
@@ -275,6 +285,7 @@ class VideoStudioWidget(QWidget):
                 }
             ]
 
+        self._last_body = body
         self._set_busy(True)
         self._status.setText("Submitting job…")
         self._gen_worker = VideoGenWorker(self._client, body)
@@ -308,7 +319,22 @@ class VideoStudioWidget(QWidget):
         self._cleanup_gen()
 
     def _on_failed(self, message: str) -> None:
-        self._status.setText(f"⚠️ {message}")
+        self._status.setText("⚠️ Generation failed — see dialog for details.")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Video generation failed")
+        box.setText("The video job failed. Full server response:")
+        import json
+
+        detail = message
+        if self._last_body is not None:
+            # Redact the (huge) first-frame data URL for readability.
+            shown = dict(self._last_body)
+            if "frame_images" in shown:
+                shown["frame_images"] = "[first-frame image attached]"
+            detail += "\n\nRequest body sent:\n" + json.dumps(shown, indent=2)
+        box.setDetailedText(detail)  # expandable + selectable/copyable
+        box.exec()
         self._cleanup_gen()
 
     def _cleanup_gen(self) -> None:

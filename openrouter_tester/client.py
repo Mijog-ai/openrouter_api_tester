@@ -118,7 +118,7 @@ class OpenRouterClient:
             raise OpenRouterError(f"Request failed: {exc}") from exc
         if resp.status_code not in (200, 201, 202):
             raise OpenRouterError(
-                f"Video job creation failed ({resp.status_code}): {resp.text[:500]}"
+                f"Video job creation failed ({resp.status_code}): {resp.text[:1500]}"
             )
         return resp.json()
 
