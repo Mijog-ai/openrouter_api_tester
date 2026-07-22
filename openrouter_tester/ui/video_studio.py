@@ -1,21 +1,26 @@
-"""Video studio: play a local video and send it to a video-input model.
+"""Video generation studio.
 
-OpenRouter has **no video-generation** models (nothing outputs video), so this
-view is about video *understanding*: load/play a clip locally and ask a
-video-capable model about it.
+OpenRouter generates video through async jobs on the dedicated
+``/api/v1/videos`` endpoint (separate from the chat ``/models`` API). This tab
+lists the real video-generation models, submits a text-to-video (or
+image-to-video) job, polls it to completion, then plays the resulting mp4
+in-window and lets you save it.
 
 Playback uses QtMultimedia, which ships with PyQt6 but needs platform media
-plugins. If it can't be imported we degrade gracefully: the player is replaced
-by a note, and you can still send the video to a model.
+plugins. If it can't load we degrade gracefully: no in-window player, but you
+can still generate and save the mp4.
 """
 
 from __future__ import annotations
 
 import base64
 import mimetypes
+import os
+import tempfile
 
 from PyQt6.QtCore import QUrl
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -23,156 +28,228 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from ..catalog import CAT_VIDEO, Model
+from ..catalog import VideoModel, build_video_models
 from ..client import OpenRouterClient
-from ..workers import CompletionWorker
+from ..workers import VideoGenWorker, VideoModelFetchWorker
 
 try:  # QtMultimedia is optional at runtime.
     from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
     from PyQt6.QtMultimediaWidgets import QVideoWidget
 
-    _MULTIMEDIA_OK = True
-    _MULTIMEDIA_ERR = ""
+    _MM_OK = True
+    _MM_ERR = ""
 except Exception as exc:  # pragma: no cover - depends on platform libs
-    _MULTIMEDIA_OK = False
-    _MULTIMEDIA_ERR = str(exc)
+    _MM_OK = False
+    _MM_ERR = str(exc)
+
+_ANY = "(default)"
 
 
 class VideoStudioWidget(QWidget):
     def __init__(self, client: OpenRouterClient, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._client = client
-        self._models: list[Model] = []
-        self._worker: CompletionWorker | None = None
-        self._video_path: str | None = None
+        self._models: list[VideoModel] = []
+        self._fetch_worker: VideoModelFetchWorker | None = None
+        self._gen_worker: VideoGenWorker | None = None
         self._player = None
         self._audio = None
+        self._video_widget = None
+        self._mp4_bytes: bytes | None = None
+        self._tmp_path: str | None = None
+        self._first_frame_data_url: str | None = None
         self._build_ui()
 
+    # ------------------------------------------------------------------ #
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        note = QLabel(
-            "OpenRouter has no video-generation models — this tests video "
-            "understanding. Load a clip, play it, and ask a video-capable "
-            "model about it."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: #888;")
-        layout.addWidget(note)
-
+        # Model + options row.
         row = QHBoxLayout()
         row.addWidget(QLabel("Video model:"))
         self._model_combo = QComboBox()
-        self._model_combo.setMinimumWidth(300)
+        self._model_combo.setMinimumWidth(240)
+        self._model_combo.currentIndexChanged.connect(self._on_model_changed)
         row.addWidget(self._model_combo)
+
+        row.addWidget(QLabel("Duration"))
+        self._duration = QComboBox()
+        row.addWidget(self._duration)
+        row.addWidget(QLabel("Resolution"))
+        self._resolution = QComboBox()
+        row.addWidget(self._resolution)
+        row.addWidget(QLabel("Aspect"))
+        self._aspect = QComboBox()
+        row.addWidget(self._aspect)
+        self._audio_check = QCheckBox("Audio")
+        row.addWidget(self._audio_check)
         row.addStretch(1)
-        self._open_btn = QPushButton("Open video…")
-        self._open_btn.clicked.connect(self._on_open)
-        row.addWidget(self._open_btn)
         layout.addLayout(row)
 
-        # Player area (or a fallback note).
-        if _MULTIMEDIA_OK:
+        # First-frame (image-to-video) row.
+        frame_row = QHBoxLayout()
+        self._frame_btn = QPushButton("First frame image…")
+        self._frame_btn.clicked.connect(self._on_pick_frame)
+        frame_row.addWidget(self._frame_btn)
+        self._frame_label = QLabel("")
+        self._frame_label.setStyleSheet("color:#888;")
+        frame_row.addWidget(self._frame_label, stretch=1)
+        layout.addLayout(frame_row)
+
+        # Player area (or fallback note).
+        if _MM_OK:
             self._video_widget = QVideoWidget()
             self._video_widget.setMinimumHeight(320)
             self._video_widget.setStyleSheet("background:#000;")
             layout.addWidget(self._video_widget, stretch=1)
-
             self._player = QMediaPlayer()
             self._audio = QAudioOutput()
             self._player.setAudioOutput(self._audio)
             self._player.setVideoOutput(self._video_widget)
 
             controls = QHBoxLayout()
-            self._play_btn = QPushButton("Play")
-            self._play_btn.clicked.connect(self._on_play)
-            self._pause_btn = QPushButton("Pause")
-            self._pause_btn.clicked.connect(lambda: self._player.pause())
-            controls.addWidget(self._play_btn)
-            controls.addWidget(self._pause_btn)
+            play = QPushButton("Play")
+            play.clicked.connect(lambda: self._player and self._player.play())
+            pause = QPushButton("Pause")
+            pause.clicked.connect(lambda: self._player and self._player.pause())
+            controls.addWidget(play)
+            controls.addWidget(pause)
             controls.addStretch(1)
+            self._save_btn = QPushButton("Save video…")
+            self._save_btn.setEnabled(False)
+            self._save_btn.clicked.connect(self._on_save)
+            controls.addWidget(self._save_btn)
             layout.addLayout(controls)
         else:
-            fallback = QLabel(
-                "Video playback unavailable (QtMultimedia could not load: "
-                f"{_MULTIMEDIA_ERR}).\nYou can still open a file and send it to "
-                "a model. On Linux, installing GStreamer plugins usually fixes "
-                "playback."
+            note = QLabel(
+                "In-window playback unavailable (QtMultimedia could not load: "
+                f"{_MM_ERR}).\nYou can still generate and save the mp4."
             )
-            fallback.setWordWrap(True)
-            fallback.setStyleSheet("color:#d29922; border:1px solid #333; padding:8px;")
-            fallback.setMinimumHeight(200)
-            layout.addWidget(fallback, stretch=1)
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#d29922; border:1px solid #333; padding:8px;")
+            note.setMinimumHeight(180)
+            layout.addWidget(note, stretch=1)
+            self._save_btn = QPushButton("Save video…")
+            self._save_btn.setEnabled(False)
+            self._save_btn.clicked.connect(self._on_save)
+            layout.addWidget(self._save_btn)
 
-        self._file_label = QLabel("No video loaded.")
-        self._file_label.setStyleSheet("color:#888;")
-        layout.addWidget(self._file_label)
-
-        # Prompt + send.
+        # Prompt + generate.
         prompt_row = QHBoxLayout()
         self._prompt = QPlainTextEdit()
-        self._prompt.setPlaceholderText("Ask about the video (e.g. 'Describe what happens')…")
+        self._prompt.setPlaceholderText("Describe the video to generate…")
         self._prompt.setFixedHeight(70)
         prompt_row.addWidget(self._prompt, stretch=1)
-        self._send_btn = QPushButton("Send to model")
-        self._send_btn.clicked.connect(self._on_send)
-        prompt_row.addWidget(self._send_btn)
+
+        btn_col = QVBoxLayout()
+        self._generate_btn = QPushButton("Generate")
+        self._generate_btn.clicked.connect(self._on_generate)
+        btn_col.addWidget(self._generate_btn)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        btn_col.addWidget(self._cancel_btn)
+        prompt_row.addLayout(btn_col)
         layout.addLayout(prompt_row)
 
-        self._response = QTextEdit()
-        self._response.setReadOnly(True)
-        self._response.setPlaceholderText("Model response appears here.")
-        self._response.setFixedHeight(120)
-        layout.addWidget(self._response)
+        self._status = QLabel("Loading video models…")
+        self._status.setStyleSheet("color:#888;")
+        layout.addWidget(self._status)
 
     # ------------------------------------------------------------------ #
-    def set_catalog(self, catalog: dict[str, list[Model]]) -> None:
-        self._models = list(catalog.get(CAT_VIDEO, []))
-        current = self._model_combo.currentData()
+    # Model loading
+    # ------------------------------------------------------------------ #
+    def refresh_models(self) -> None:
+        if self._fetch_worker is not None:
+            return
+        self._status.setText("Loading video models…")
+        self._fetch_worker = VideoModelFetchWorker(self._client)
+        self._fetch_worker.finished_ok.connect(self._on_models)
+        self._fetch_worker.failed.connect(self._on_models_failed)
+        self._fetch_worker.start()
+
+    def _on_models(self, raw: list) -> None:
+        self._models = build_video_models(raw)
         self._model_combo.blockSignals(True)
         self._model_combo.clear()
         for m in self._models:
             self._model_combo.addItem(m.name, m.id)
-        if current is not None:
-            idx = self._model_combo.findData(current)
-            if idx >= 0:
-                self._model_combo.setCurrentIndex(idx)
         self._model_combo.blockSignals(False)
+        self._on_model_changed()
+        self._status.setText(f"{len(self._models)} video-generation models available.")
+        if self._fetch_worker is not None:
+            self._fetch_worker.wait(50)
+            self._fetch_worker = None
+
+    def _on_models_failed(self, message: str) -> None:
+        self._status.setText(f"Failed to load video models: {message}")
+        if self._fetch_worker is not None:
+            self._fetch_worker.wait(50)
+            self._fetch_worker = None
+
+    def _current_model(self) -> VideoModel | None:
+        idx = self._model_combo.currentIndex()
+        if 0 <= idx < len(self._models):
+            return self._models[idx]
+        return None
+
+    def _on_model_changed(self, *_args) -> None:
+        m = self._current_model()
+        self._duration.clear()
+        self._resolution.clear()
+        self._aspect.clear()
+        self._duration.addItem(_ANY, None)
+        self._resolution.addItem(_ANY, None)
+        self._aspect.addItem(_ANY, None)
+        if m is None:
+            return
+        for d in m.supported_durations:
+            self._duration.addItem(f"{d}s", d)
+        for r in m.supported_resolutions:
+            self._resolution.addItem(r, r)
+        for a in m.supported_aspect_ratios:
+            self._aspect.addItem(a, a)
+        self._audio_check.setChecked(m.generate_audio)
+        self._audio_check.setEnabled(m.generate_audio)
+        self._frame_btn.setVisible(m.supports_image_to_video)
+        if not m.supports_image_to_video:
+            self._first_frame_data_url = None
+            self._frame_label.setText("")
 
     # ------------------------------------------------------------------ #
-    def _on_open(self) -> None:
+    def _on_pick_frame(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open video", "", "Videos (*.mp4 *.mov *.webm *.mkv *.avi)"
+            self, "First frame image", "", "Images (*.png *.jpg *.jpeg *.webp)"
         )
         if not path:
             return
-        self._video_path = path
-        self._file_label.setText(f"Loaded: {path.rsplit('/', 1)[-1]}")
-        if _MULTIMEDIA_OK and self._player is not None:
-            self._player.setSource(QUrl.fromLocalFile(path))
-            self._player.play()
-
-    def _on_play(self) -> None:
-        if _MULTIMEDIA_OK and self._player is not None:
-            self._player.play()
-
-    def _on_send(self) -> None:
-        if self._worker is not None:
+        mime, _ = mimetypes.guess_type(path)
+        mime = mime or "image/png"
+        try:
+            with open(path, "rb") as fh:
+                enc = base64.b64encode(fh.read()).decode("ascii")
+        except OSError as exc:
+            QMessageBox.warning(self, "Read failed", str(exc))
             return
-        model_id = self._model_combo.currentData()
-        if not model_id:
-            QMessageBox.information(self, "No model", "No video-capable model selected.")
+        self._first_frame_data_url = f"data:{mime};base64,{enc}"
+        self._frame_label.setText(f"First frame: {path.rsplit('/', 1)[-1]}")
+
+    # ------------------------------------------------------------------ #
+    def _on_generate(self) -> None:
+        if self._gen_worker is not None:
             return
-        if not self._video_path:
-            QMessageBox.information(self, "No video", "Open a video file first.")
+        model = self._current_model()
+        if model is None:
+            return
+        prompt = self._prompt.toPlainText().strip()
+        if not prompt:
+            QMessageBox.information(self, "No prompt", "Enter a prompt first.")
             return
         if not self._client.api_key:
             QMessageBox.information(
@@ -180,45 +257,87 @@ class VideoStudioWidget(QWidget):
                 "Enter your OpenRouter API key (top of the window) first.",
             )
             return
-        prompt = self._prompt.toPlainText().strip() or "Describe this video."
 
+        body: dict = {"model": model.id, "prompt": prompt}
+        if self._duration.currentData() is not None:
+            body["duration"] = self._duration.currentData()
+        if self._resolution.currentData() is not None:
+            body["resolution"] = self._resolution.currentData()
+        if self._aspect.currentData() is not None:
+            body["aspect_ratio"] = self._aspect.currentData()
+        if self._audio_check.isEnabled():
+            body["generate_audio"] = self._audio_check.isChecked()
+        if self._first_frame_data_url and model.supports_image_to_video:
+            body["frame_images"] = [
+                {
+                    "frame_type": "first_frame",
+                    "image_url": {"url": self._first_frame_data_url},
+                }
+            ]
+
+        self._set_busy(True)
+        self._status.setText("Submitting job…")
+        self._gen_worker = VideoGenWorker(self._client, body)
+        self._gen_worker.status.connect(self._status.setText)
+        self._gen_worker.finished_ok.connect(self._on_generated)
+        self._gen_worker.failed.connect(self._on_failed)
+        self._gen_worker.start()
+
+    def _on_cancel(self) -> None:
+        if self._gen_worker is not None:
+            self._gen_worker.request_stop()
+            self._status.setText("Cancelling…")
+
+    def _on_generated(self, data: bytes) -> None:
+        self._mp4_bytes = data
+        self._status.setText(f"Done: received {len(data):,} bytes of video.")
+        self._save_btn.setEnabled(True)
+        # Write to a temp file and play it.
         try:
-            with open(self._video_path, "rb") as fh:
-                encoded = base64.b64encode(fh.read()).decode("ascii")
+            fd, path = tempfile.mkstemp(suffix=".mp4")
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            self._tmp_path = path
         except OSError as exc:
-            QMessageBox.warning(self, "Read failed", str(exc))
+            self._status.setText(f"Saved-to-temp failed: {exc}")
+            self._cleanup_gen()
             return
-        mime, _ = mimetypes.guess_type(self._video_path)
-        mime = mime or "video/mp4"
-        data_url = f"data:{mime};base64,{encoded}"
-
-        content = [
-            {"type": "text", "text": prompt},
-            {"type": "video_url", "video_url": {"url": data_url}},
-        ]
-        messages = [{"role": "user", "content": content}]
-
-        self._response.setPlainText("Sending…")
-        self._send_btn.setEnabled(False)
-        self._worker = CompletionWorker(
-            self._client, model_id, messages, temperature=0.5
-        )
-        self._worker.finished_ok.connect(self._on_response)
-        self._worker.failed.connect(self._on_failed)
-        self._worker.start()
-
-    def _on_response(self, message: dict) -> None:
-        content = message.get("content")
-        text = content if isinstance(content, str) else ""
-        self._response.setPlainText(text or "(no text returned)")
-        self._cleanup()
+        if _MM_OK and self._player is not None:
+            self._player.setSource(QUrl.fromLocalFile(self._tmp_path))
+            self._player.play()
+        self._cleanup_gen()
 
     def _on_failed(self, message: str) -> None:
-        self._response.setPlainText(f"⚠️ {message}")
-        self._cleanup()
+        self._status.setText(f"⚠️ {message}")
+        self._cleanup_gen()
 
-    def _cleanup(self) -> None:
-        if self._worker is not None:
-            self._worker.wait(50)
-            self._worker = None
-        self._send_btn.setEnabled(True)
+    def _cleanup_gen(self) -> None:
+        if self._gen_worker is not None:
+            self._gen_worker.wait(50)
+            self._gen_worker = None
+        self._set_busy(False)
+
+    def _set_busy(self, busy: bool) -> None:
+        self._generate_btn.setEnabled(not busy)
+        self._cancel_btn.setEnabled(busy)
+
+    def _on_save(self) -> None:
+        if not self._mp4_bytes:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save video", "generated.mp4", "MP4 video (*.mp4)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".mp4"):
+            path += ".mp4"
+        try:
+            with open(path, "wb") as fh:
+                fh.write(self._mp4_bytes)
+        except OSError as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
+
+    # Video models come from /videos/models via refresh_models(); the chat
+    # catalog is irrelevant here, so set_catalog is intentionally a no-op.
+    def set_catalog(self, _catalog) -> None:
+        return

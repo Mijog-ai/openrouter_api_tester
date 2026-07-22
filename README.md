@@ -35,9 +35,12 @@ vision/multimodal, image generation, document/file) is supported.
     click Generate, see the picture large, and **Save** it. Images are found in
     every response shape (dedicated `images` array, content parts, or an image
     URL embedded in text) and remote image URLs are downloaded automatically.
-  - **Video** — OpenRouter has **no video-generation** models, so this is for
-    video *understanding*: open a local clip, **play it in-window**
-    (QtMultimedia), and send it to a video-capable model to ask about it.
+  - **Video** — real **text-to-video / image-to-video generation** via
+    OpenRouter's dedicated async `/api/v1/videos` endpoint (Veo, Sora, Kling,
+    Wan, Seedance, Hailuo, Grok, …). Pick a model, set duration / resolution /
+    aspect ratio (populated from that model's capabilities), optionally attach a
+    first-frame image, click Generate; the job is polled to completion, then the
+    mp4 **plays in-window** (QtMultimedia) and can be saved.
 - **Adaptive Chat playground** — the chat panel reshapes itself to the selected
   model:
   - **Text** → plain streaming chat.

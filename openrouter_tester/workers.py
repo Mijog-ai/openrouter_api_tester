@@ -192,6 +192,111 @@ class ImageGenWorker(QThread):
         return None
 
 
+class VideoModelFetchWorker(QThread):
+    """Fetch the list of video-generation models off the UI thread."""
+
+    finished_ok = pyqtSignal(list)
+    failed = pyqtSignal(str)
+
+    def __init__(self, client: OpenRouterClient) -> None:
+        super().__init__()
+        self._client = client
+
+    def run(self) -> None:
+        try:
+            models = self._client.list_video_models()
+        except OpenRouterError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # pragma: no cover - defensive
+            self.failed.emit(f"Unexpected error: {exc}")
+        else:
+            self.finished_ok.emit(models)
+
+
+class VideoGenWorker(QThread):
+    """Run an async video-generation job: create → poll → download the mp4."""
+
+    status = pyqtSignal(str)  # human-readable progress updates
+    finished_ok = pyqtSignal(bytes)  # the finished mp4 bytes
+    failed = pyqtSignal(str)
+
+    _TERMINAL_OK = {"completed", "succeeded", "success"}
+    _TERMINAL_FAIL = {"failed", "error", "cancelled", "canceled"}
+
+    def __init__(
+        self,
+        client: OpenRouterClient,
+        body: dict[str, Any],
+        *,
+        poll_seconds: float = 4.0,
+        timeout_seconds: float = 600.0,
+    ) -> None:
+        super().__init__()
+        self._client = client
+        self._body = body
+        self._poll = poll_seconds
+        self._timeout = timeout_seconds
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def run(self) -> None:
+        try:
+            self.status.emit("Submitting job…")
+            created = self._client.create_video_job(self._body)
+        except OpenRouterError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            self.failed.emit(f"Unexpected error: {exc}")
+            return
+
+        job_id = created.get("id")
+        if not job_id:
+            self.failed.emit(f"No job id in response: {created}")
+            return
+
+        waited = 0.0
+        while True:
+            if self._stop_requested:
+                self.failed.emit("Cancelled.")
+                return
+            if waited >= self._timeout:
+                self.failed.emit("Timed out waiting for the video.")
+                return
+            try:
+                job = self._client.get_video_job(job_id)
+            except OpenRouterError as exc:
+                self.failed.emit(str(exc))
+                return
+
+            state = str(job.get("status", "")).lower()
+            if state in self._TERMINAL_OK:
+                break
+            if state in self._TERMINAL_FAIL:
+                detail = job.get("error") or job.get("failure_reason") or state
+                self.failed.emit(f"Generation {state}: {detail}")
+                return
+            self.status.emit(f"Status: {state or 'working'}… ({int(waited)}s)")
+            self._sleep(self._poll)
+            waited += self._poll
+
+        self.status.emit("Downloading video…")
+        try:
+            data = self._client.download_video_content(job_id, index=0)
+        except OpenRouterError as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished_ok.emit(data)
+
+    def _sleep(self, seconds: float) -> None:
+        # Sleep in small slices so a stop request is honoured quickly.
+        end = time.perf_counter() + seconds
+        while time.perf_counter() < end and not self._stop_requested:
+            time.sleep(0.1)
+
+
 class BatchTestWorker(QThread):
     """Probe a list of models sequentially with a small prompt.
 

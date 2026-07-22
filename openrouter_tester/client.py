@@ -83,6 +83,70 @@ class OpenRouterClient:
         return resp.content
 
     # ------------------------------------------------------------------ #
+    # Video generation (async jobs on the dedicated /videos endpoint)
+    # ------------------------------------------------------------------ #
+    def list_video_models(self) -> list[dict[str, Any]]:
+        """Return the list of video-generation models (``/videos/models``)."""
+        url = f"{BASE_URL}/videos/models"
+        try:
+            resp = requests.get(url, headers=self._headers(), timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise OpenRouterError(f"Failed to reach OpenRouter: {exc}") from exc
+        if resp.status_code != 200:
+            raise OpenRouterError(
+                f"Video model list failed ({resp.status_code}): {resp.text[:300]}"
+            )
+        payload = resp.json()
+        data = payload.get("data", payload)
+        if not isinstance(data, list):
+            raise OpenRouterError("Unexpected response shape from /videos/models")
+        return data
+
+    def create_video_job(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Start a video-generation job. Returns ``{id, polling_url, status}``."""
+        if not self.api_key:
+            raise OpenRouterError("An OpenRouter API key is required for video.")
+        url = f"{BASE_URL}/videos"
+        try:
+            resp = requests.post(
+                url,
+                headers=self._headers({"Content-Type": "application/json"}),
+                data=json.dumps(body),
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise OpenRouterError(f"Request failed: {exc}") from exc
+        if resp.status_code not in (200, 201, 202):
+            raise OpenRouterError(
+                f"Video job creation failed ({resp.status_code}): {resp.text[:500]}"
+            )
+        return resp.json()
+
+    def get_video_job(self, job_id: str) -> dict[str, Any]:
+        """Poll a video job's status (``GET /videos/{id}``)."""
+        url = f"{BASE_URL}/videos/{job_id}"
+        try:
+            resp = requests.get(url, headers=self._headers(), timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise OpenRouterError(f"Request failed: {exc}") from exc
+        if resp.status_code != 200:
+            raise OpenRouterError(
+                f"Video status poll failed ({resp.status_code}): {resp.text[:300]}"
+            )
+        return resp.json()
+
+    def download_video_content(self, job_id: str, index: int = 0) -> bytes:
+        """Download the finished mp4 (``GET /videos/{id}/content``)."""
+        url = f"{BASE_URL}/videos/{job_id}/content?index={index}"
+        try:
+            resp = requests.get(url, headers=self._headers(), timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise OpenRouterError(f"Video download failed: {exc}") from exc
+        if resp.status_code != 200:
+            raise OpenRouterError(f"Video download failed ({resp.status_code}).")
+        return resp.content
+
+    # ------------------------------------------------------------------ #
     # Chat completions
     # ------------------------------------------------------------------ #
     def chat_completion_stream(

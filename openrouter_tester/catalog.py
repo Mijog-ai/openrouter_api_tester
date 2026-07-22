@@ -143,6 +143,47 @@ class Model:
         )
 
 
+@dataclass
+class VideoModel:
+    """A normalised view over a ``/videos/models`` entry (video generation)."""
+
+    id: str
+    name: str
+    description: str
+    supported_durations: list[int] = field(default_factory=list)
+    supported_resolutions: list[str] = field(default_factory=list)
+    supported_aspect_ratios: list[str] = field(default_factory=list)
+    supported_frame_images: list[str] = field(default_factory=list)
+    generate_audio: bool = False
+    supports_seed: bool = False
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def supports_image_to_video(self) -> bool:
+        return bool(self.supported_frame_images)
+
+
+def video_model_from_raw(raw: dict[str, Any]) -> VideoModel:
+    return VideoModel(
+        id=raw.get("id", ""),
+        name=raw.get("name") or raw.get("id", ""),
+        description=raw.get("description", "") or "",
+        supported_durations=[int(d) for d in (raw.get("supported_durations") or [])],
+        supported_resolutions=list(raw.get("supported_resolutions") or []),
+        supported_aspect_ratios=list(raw.get("supported_aspect_ratios") or []),
+        supported_frame_images=list(raw.get("supported_frame_images") or []),
+        generate_audio=bool(raw.get("generate_audio")),
+        supports_seed=bool(raw.get("seed")),
+        raw=raw,
+    )
+
+
+def build_video_models(raw_models: list[dict[str, Any]]) -> list[VideoModel]:
+    models = [video_model_from_raw(r) for r in raw_models if r.get("id")]
+    models.sort(key=lambda m: m.name.lower())
+    return models
+
+
 def _to_float(value: Any) -> float:
     try:
         return float(value)

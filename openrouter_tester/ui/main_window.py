@@ -70,7 +70,7 @@ class MainWindow(QMainWindow):
         if raw:
             self._apply_models(raw, source=f"preload ({generated_at or 'bundled'})")
             self._set_source_indicator("cached", f"Preload generated {generated_at}")
-        self.refresh_models()
+        self.refresh_models()  # also kicks off the video-model fetch
 
     # ------------------------------------------------------------------ #
     # UI
@@ -171,6 +171,7 @@ class MainWindow(QMainWindow):
         self._refresh_btn.setEnabled(False)
         self._set_source_indicator("loading")
         self.statusBar().showMessage("Fetching live models from OpenRouter…")
+        self._video_studio.refresh_models()
         self._fetch_worker = ModelFetchWorker(self._client)
         self._fetch_worker.finished_ok.connect(self._on_models_loaded)
         self._fetch_worker.failed.connect(self._on_models_failed)
